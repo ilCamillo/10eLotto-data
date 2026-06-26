@@ -12,47 +12,47 @@ def scrape():
     try:
         res = requests.get(api_url)
         if res.status_code != 200: 
-            print(f"Errore API: {res.status_code}")
+            print(f"Errore Scrape.do: {res.status_code}")
             return None
         
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. Trova il blocco dell'ultima estrazione (serale)
-        # Di solito è il primo media-body che contiene i numeri
-        draw_block = soup.find('div', class_='media-body')
-        if not draw_block:
-            print("Blocco estrazione non trovato")
-            return None
-        
-        # 2. Estrai la DATA corretta
-        # Cerchiamo il testo che contiene il giorno (es: Giovedì 25 Giugno 2026)
-        date_element = draw_block.find(string=re.compile(r'(Lunedì|Martedì|Mercoledì|Giovedì|Venerdì|Sabato|Domenica)', re.I))
-        data_estrazione = date_element.strip() if date_element else "Data non trovata"
+        # 1. CERCA LA DATA (Formato: Giorno Numero Mese Anno)
+        date_pattern = re.compile(r'(Lunedì|Martedì|Mercoledì|Giovedì|Venerdì|Sabato|Domenica)\s+\d+\s+(Gennaio|Febbraio|Marzo|Aprile|Maggio|Giugno|Luglio|Agosto|Settembre|Ottobre|Novembre|Dicembre)\s+\d{4}', re.I)
+        all_text = soup.get_text(separator=' ')
+        date_match = date_pattern.search(all_text)
+        data_estrazione = date_match.group(0).strip() if date_match else "Data non trovata"
         print(f"Data trovata: {data_estrazione}")
 
-        # 3. Estrai i 20 NUMERI (ball-10elotto)
-        numeri_20 = [n.text.strip() for n in draw_block.find_all('span', class_='ball-10elotto')]
+        # 2. CERCA TUTTI I NUMERI (Palline)
+        # Cerchiamo i numeri basandoci sulle classi CSS o sul contenuto numerico
+        balls = soup.find_all('span', class_=re.compile(r'ball|num|pallina', re.I))
+        raw_nums = [b.text.strip() for b in balls if b.text.strip().isdigit()]
         
-        # 4. Estrai ORO e DOPPIO ORO
-        oro_tag = draw_block.find('span', class_='ball-oro')
-        doro_tag = draw_block.find('span', class_='ball-doppio-oro')
-        
-        oro = oro_tag.text.strip() if oro_tag else ""
-        doro = doro_tag.text.strip() if doro_tag else ""
-        
-        # 5. Estrai i 15 NUMERI EXTRA (ball-extra)
-        extra = [e.text.strip() for e in draw_block.find_all('span', class_='ball-extra')]
-        
-        # Se ball-extra non ci sono, li prendiamo per posizione
-        if not extra:
-            all_balls = [b.text.strip() for b in draw_block.find_all('span', class_=re.compile(r'ball'))]
-            if len(all_balls) >= 37:
-                extra = all_balls[22:37]
+        # Se non trovati con le classi, cerchiamo qualsiasi numero 1-90 isolato
+        if len(raw_nums) < 20:
+            raw_nums = [t.strip() for t in soup.find_all(string=re.compile(r'^\b\d{1,2}\b$'))]
 
-        print(f"Parsing completato: {len(numeri_20)} numeri, Oro: {oro}, Doro: {doro}, Extra: {len(extra)}")
+        # Rimuoviamo duplicati mantenendo l'ordine originale
+        clean_nums = []
+        for n in raw_nums:
+            if n not in clean_nums:
+                clean_nums.append(n)
+        
+        print(f"Numeri unici trovati: {len(clean_nums)}")
 
-        if len(numeri_20) < 20:
+        if len(clean_nums) < 20:
+            print("ERRORE: Non ho trovato abbastanza numeri nella pagina.")
             return None
+
+        # 3. ASSEGNAZIONE POSIZIONI
+        # I primi 20 numeri sono l'estrazione principale
+        numeri_20 = clean_nums[:20]
+        # Il 21esimo è l'Oro, il 22esimo il Doppio Oro
+        oro = clean_nums[20] if len(clean_nums) > 20 else ""
+        doro = clean_nums[21] if len(clean_nums) > 21 else ""
+        # Dal 23esimo in poi sono gli Extra (solitamente 15 numeri)
+        extra = clean_nums[22:37] if len(clean_nums) > 22 else []
 
         return f"{data_estrazione};{' '.join(numeri_20)};{oro};{doro};{' '.join(extra)}"
         
@@ -62,7 +62,7 @@ def scrape():
 
 def update_csv(new_line):
     if not new_line:
-        print("Nessun dato valido da aggiungere.")
+        print("Scraping fallito, nessuna riga aggiunta.")
         return
         
     if not os.path.exists(CSV_FILE):
@@ -70,26 +70,29 @@ def update_csv(new_line):
             f.write("Date;Numbers;Gold;DoubleGold;Extra\n")
             
     with open(CSV_FILE, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+        content = f.read()
     
     data_nuova = new_line.split(';')[0].strip()
     
-    # Pulizia: Creiamo una nuova lista di righe escludendo doppioni e la riga errata precedente
-    filtered_lines = [lines[0]] # Teniamo l'header
-    for l in lines[1:]:
-        # Escludiamo la riga con l'errore precedente e quella con la stessa data
-        if "ultimi 60 giorni" in l or data_nuova in l:
-            continue
-        filtered_lines.append(l)
-    
-    # Inseriamo la nuova riga in seconda posizione (sotto l'header)
-    filtered_lines.insert(1, new_line + "\n")
+    # Controlliamo se la data è già presente per non creare duplicati
+    if data_nuova in content:
+        print(f"L'estrazione del {data_nuova} è già presente nel file.")
+        return
+
+    # Inseriamo la nuova riga in alto dopo l'intestazione
+    lines = content.splitlines()
+    header = lines[0]
+    others = lines[1:]
     
     with open(CSV_FILE, 'w', encoding='utf-8') as f:
-        f.writelines(filtered_lines)
+        f.write(header + "\n")
+        f.write(new_line + "\n")
+        for l in others:
+            if l.strip(): # Evita righe vuote
+                f.write(l + "\n")
     
-    print(f"CSV AGGIORNATO: {data_nuova}")
+    print(f"SUCCESSO! CSV aggiornato con l'estrazione del {data_nuova}")
 
-# Esecuzione
-nuova_estrazione = scrape()
-update_csv(nuova_estrazione)
+# Esecuzione script
+risultato = scrape()
+update_csv(risultato)
