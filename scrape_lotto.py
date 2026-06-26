@@ -1,94 +1,85 @@
 import requests
 from bs4 import BeautifulSoup
 import os
+import re
 
 TOKEN = os.environ.get('SCRAPE_DO_TOKEN')
-# Puntiamo alla pagina che contiene l'ultima estrazione serale
-TARGET_URL = "https://www.estrazionidellotto.it/10-e-lotto/estrazioni-10-e-lotto-serale.html"
+# URL del sito che hai indicato
+TARGET_URL = "https://www.estrazionedellotto.it/10elotto/ultime-estrazioni-10elotto"
 CSV_FILE = "storico_10elotto.csv"
 
 def scrape():
     api_url = f"http://api.scrape.do?token={TOKEN}&url={TARGET_URL}"
+    print(f"Avvio scraping su: {TARGET_URL}")
     try:
         res = requests.get(api_url)
         if res.status_code != 200: 
-            print(f"Errore Scrape.do: {res.status_code}")
+            print(f"Errore API: {res.status_code}")
             return None
         
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. Parsing della DATA
-        # Cerchiamo il titolo che contiene la data dell'estrazione
+        # 1. DATA: La cerchiamo nel testo che contiene "Estrazione Lotto di"
         h1_tag = soup.find('h1')
-        if not h1_tag:
-            print("ERRORE: Titolo H1 non trovato nella pagina")
+        if not h1_tag: return None
+        # Pulizia: "Estrazione Lotto di Giovedì 25 Giugno 2026" -> "Giovedì 25 Giugno 2026"
+        data_estrazione = h1_tag.text.replace("Estrazione Lotto di", "").strip()
+        print(f"Data trovata: {data_estrazione}")
+
+        # 2. NUMERI: Nel sito indicato i numeri 10eLotto sono spesso in sfere o celle specifiche
+        # Cerchiamo tutti i numeri nel contenitore del 10eLotto
+        all_numbers = []
+        # Cerchiamo i numeri nelle classi comuni di questo sito (es. 'pallina-10elotto' o simili)
+        # In alternativa, prendiamo i numeri dal blocco testo se identificabile
+        content = soup.find_all('span', class_=re.compile(r'ball|num|lotto', re.I))
+        
+        # Tentativo più robusto: cerchiamo i numeri nel contenitore specifico
+        # (Adattato alla struttura di estrazionedellotto.it)
+        draw_div = soup.find('div', {'id': 'dieci-e-lotto-serale'}) or soup
+        balls = draw_div.find_all(text=re.compile(r'^\d{1,2}$'))
+        
+        # Filtriamo solo i numeri reali (1-90) e rimuoviamo duplicati mantenendo l'ordine
+        clean_nums = []
+        for b in balls:
+            n = b.strip()
+            if n.isdigit() and 1 <= int(n) <= 90 and n not in clean_nums:
+                clean_nums.append(n)
+        
+        print(f"Numeri grezzi trovati: {len(clean_nums)}")
+
+        # I primi 20 sono i numeri estratti
+        numeri_20 = clean_nums[:20]
+        # Il 21esimo e 22esimo sono solitamente Oro e Doppio Oro su questo sito
+        oro = clean_nums[20] if len(clean_nums) > 20 else ""
+        doro = clean_nums[21] if len(clean_nums) > 21 else ""
+        # Dal 23esimo in poi sono gli Extra (solitamente 15)
+        extra = clean_nums[22:37] if len(clean_nums) > 22 else []
+
+        if len(numeri_20) < 20:
+            print("Non ho trovato abbastanza numeri.")
             return None
-            
-        # Puliamo la stringa per ottenere solo la data (es: "Giovedì 25 Giugno 2026")
-        data_estrazione = h1_tag.text.replace("Estrazione 10eLotto del ", "").strip()
-        print(f"Data rilevata sul sito: {data_estrazione}")
-        
-        # 2. Parsing dei 20 NUMERI
-        numeri_list = []
-        divs = soup.find_all('div', class_='num_estratto_10_e_lotto')
-        for d in divs[:20]:
-            numeri_list.append(d.text.strip())
-        
-        if len(numeri_list) < 20:
-            print(f"ERRORE: Trovati solo {len(numeri_list)} numeri invece di 20")
-            return None
-        numeri_str = " ".join(numeri_list)
 
-        # 3. ORO e DOPPIO ORO
-        oro_div = soup.find('div', class_='num_estratto_oro')
-        doro_div = soup.find('div', class_='num_estratto_doppio_oro')
-        
-        oro = oro_div.text.strip() if oro_div else ""
-        doro = doro_div.text.strip() if doro_div else ""
-
-        # 4. Numeri EXTRA
-        extra_list = []
-        extra_divs = soup.find_all('div', class_='num_estratto_extra')
-        for ed in extra_divs:
-            extra_list.append(ed.text.strip())
-        extra_str = " ".join(extra_list)
-
-        return f"{data_estrazione};{numeri_str};{oro};{doro};{extra_str}"
+        return f"{data_estrazione};{' '.join(numeri_20)};{oro};{doro};{' '.join(extra)}"
         
     except Exception as e:
-        print(f"ERRORE durante lo scraping: {e}")
+        print(f"Errore: {e}")
         return None
 
 def update_csv(new_line):
-    if not new_line: 
-        print("Scraping fallito, nessuna riga da aggiungere.")
-        return
-        
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, 'w', encoding='utf-8') as f:
-            f.write("Date;Numbers;Gold;DoubleGold;Extra\n")
-            
+    if not new_line: return
     with open(CSV_FILE, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+        content = f.read()
     
-    # Prendiamo solo la data della nuova estrazione per vedere se c'è già
-    nuova_data = new_line.split(';')[0].strip()
-    
-    # Controlliamo se la data esiste già nel file
-    for line in lines:
-        if nuova_data.lower() in line.lower():
-            print(f"L'estrazione del {nuova_data} è già presente nel CSV. Salto l'aggiornamento.")
-            return
+    data_nuova = new_line.split(';')[0].strip()
+    if data_nuova in content:
+        print(f"Estrazione {data_nuova} già presente.")
+        return
 
-    # Se non c'è, la aggiungiamo in cima (subito dopo l'header)
-    header = lines[0]
-    vecchi_dati = lines[1:]
+    lines = content.splitlines()
     with open(CSV_FILE, 'w', encoding='utf-8') as f:
-        f.write(header)
-        f.write(new_line + "\n")
-        f.writelines(vecchi_dati)
-    print(f"EVVIVA! Aggiunta nuova estrazione: {nuova_data}")
+        f.write(lines[0] + "\n") # Header
+        f.write(new_line + "\n") # Nuova estrazione
+        for l in lines[1:]: f.write(l + "\n")
+    print("CSV AGGIORNATO!")
 
-# Esecuzione
-risultato = scrape()
-update_csv(risultato)
+update_csv(scrape())
